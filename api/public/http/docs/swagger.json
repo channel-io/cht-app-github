@@ -1,0 +1,88 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "title": "GO HTTP server",
+        "contact": {}
+    },
+    "paths": {
+        "/hook/v1": {
+            "post": {
+                "description": "Process webhook event",
+                "produces": [
+                    "text/plain"
+                ],
+                "tags": [
+                    "Hook"
+                ],
+                "summary": "Process Event",
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    }
+                }
+            }
+        },
+        "/ping": {
+            "get": {
+                "description": "Ping",
+                "produces": [
+                    "text/plain"
+                ],
+                "tags": [
+                    "Utility"
+                ],
+                "summary": "Ping",
+                "responses": {
+                    "200": {
+                        "description": "pong",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/version": {
+            "get": {
+                "description": "Retrieves current version of the server.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Utility"
+                ],
+                "summary": "Version",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/version.ok"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "version.ok": {
+            "type": "object",
+            "properties": {
+                "buildTime": {
+                    "type": "string",
+                    "example": "2023-01-01T00:00:00Z"
+                },
+                "commit": {
+                    "type": "string",
+                    "example": "\u003ccommit-hash\u003e"
+                },
+                "dirty": {
+                    "type": "boolean"
+                },
+                "version": {
+                    "type": "string",
+                    "example": "v0.1.0"
+                }
+            }
+        }
+    }
+}

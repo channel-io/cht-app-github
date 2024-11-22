@@ -1,0 +1,31 @@
+api:
+  public:
+    http:
+      port: 4000
+
+log:
+  level: info
+  enableConsole: true
+  enableSentry: false
+
+github:
+  app:
+    id: ""
+    clientId: ""
+    webhookSecret: ""
+    privateKeyPath: ""
+  properties:
+    channelIdKey: cht_channel_id
+    groupIdKey: cht_exp_group_id
+    releaseGroupIdKey: cht_exp_release_group_id
+
+channelTalk:
+  deskUrl: http://localhost:8080
+  botName: Github
+  managerProfileKey: github-username
+
+  appStore:
+    baseUrl: TODO
+  app:
+    secret: ""
+    id: ""

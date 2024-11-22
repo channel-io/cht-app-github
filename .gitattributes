@@ -1,0 +1,2 @@
+api/public/http/docs/*  linguist-generated=true
+api/public/http/docs/*  -diff -merge

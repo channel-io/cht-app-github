@@ -1,0 +1,27 @@
+name: cht-app-github
+
+services:
+  generate:
+    image: public.ecr.aws/i8a4b9p4/circleci-base/go:1.22-bookworm-tools
+    environment:
+      GOCACHE: /mnt/cache/build
+      GOMODCACHE: /mnt/cache/mod
+    volumes:
+      - ..:/work
+      - cache:/mnt/cache
+    working_dir: /work
+    command: make _generate
+
+  lint:
+    image: golangci/golangci-lint:v1.60.3
+    environment:
+      GOCACHE: /mnt/cache/build
+      GOMODCACHE: /mnt/cache/mod
+    volumes:
+      - ..:/work
+      - cache:/mnt/cache
+    working_dir: /work
+    command: make _lint
+
+volumes:
+  cache:

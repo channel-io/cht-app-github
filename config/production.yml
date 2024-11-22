@@ -1,0 +1,31 @@
+api:
+  public:
+    http:
+      port: 4000
+
+log:
+  level: warn
+  enableConsole: true
+  enableSentry: false
+
+github:
+  app:
+    id: ""
+    clientId: ""
+    webhookSecret: ""
+    privateKeyPath: resource/private-key.pem
+  properties:
+    channelIdKey: cht_channel_id
+    groupIdKey: cht_group_id
+    releaseGroupIdKey: cht_release_group_id
+
+channelTalk:
+  deskUrl: https://desk.channel.io
+  botName: Github
+  managerProfileKey: github-username
+
+  appStore:
+    baseUrl: https://app-store-api.channel.io
+  app:
+    secret: ""
+    id: ""

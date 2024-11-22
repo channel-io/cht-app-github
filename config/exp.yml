@@ -1,0 +1,31 @@
+api:
+  public:
+    http:
+      port: 4000
+
+log:
+  level: info
+  enableConsole: true
+  enableSentry: false
+
+github:
+  app:
+    id: ""
+    clientId: ""
+    webhookSecret: ""
+    privateKeyPath: resource/private-key.pem
+  properties:
+    channelIdKey: exp_cht_channel_id
+    groupIdKey: exp_cht_group_id
+    releaseGroupIdKey: exp_cht_release_group_id
+
+channelTalk:
+  deskUrl: ""
+  botName: Github
+  managerProfileKey: github-username
+
+  appStore:
+    baseUrl: ""
+  app:
+    secret: ""
+    id: ""

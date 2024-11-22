@@ -1,0 +1,57 @@
+definitions:
+  version.ok:
+    properties:
+      buildTime:
+        example: "2023-01-01T00:00:00Z"
+        type: string
+      commit:
+        example: <commit-hash>
+        type: string
+      dirty:
+        type: boolean
+      version:
+        example: v0.1.0
+        type: string
+    type: object
+info:
+  contact: {}
+  title: GO HTTP server
+paths:
+  /hook/v1:
+    post:
+      description: Process webhook event
+      produces:
+      - text/plain
+      responses:
+        "200":
+          description: OK
+      summary: Process Event
+      tags:
+      - Hook
+  /ping:
+    get:
+      description: Ping
+      produces:
+      - text/plain
+      responses:
+        "200":
+          description: pong
+          schema:
+            type: string
+      summary: Ping
+      tags:
+      - Utility
+  /version:
+    get:
+      description: Retrieves current version of the server.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/version.ok'
+      summary: Version
+      tags:
+      - Utility
+swagger: "2.0"
