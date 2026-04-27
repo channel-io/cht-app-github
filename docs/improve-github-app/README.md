@@ -83,13 +83,104 @@ association miss 시 packet은 drop/skip 한다.
 - downstream dispatch는 best-effort retry 대상이다. worker가 downstream thread write 성공 후 ack/state 저장 전에 중단되면 동일 delivery의 thread message가 중복 관찰될 수 있다.
 - 따라서 Phase 1/2의 dedup 범위는 ingress 진입, pre-root append, canonical root selection까지로 한정한다.
 
-## 5. ValKey Schema
+## 5. Design Decisions
+
+### 5-1. ValKey lock vs Kafka partition-by-subject
+
+Kafka에서 subject key로 partition을 나누면 같은 subject의 worker 경쟁을 구조적으로 줄일 수 있다.
+다만 Phase 1/2에서는 Kafka partition을 correctness boundary로 두지 않고 ValKey 기반 ingress/state를 먼저 둔다.
+
+이유:
+
+- 현재 webhook ingress는 HTTP request를 즉시 ack해야 하므로 delivery dedup, raw packet enqueue, retry/backlog 상태가 먼저 필요하다.
+- root pointer, pending Anchor, pre-root buffer, lazy rebuild 상태는 Kafka를 쓰더라도 별도 shared state가 필요하다.
+- Kafka 전환 시점과 GitHub App 정합성 개선 시점을 강하게 묶지 않는다. Kafka 도입 전에도 중복 delivery와 root lookup miss를 줄일 수 있어야 한다.
+- partition-by-subject는 좋은 worker scheduling 전략이지만, `first root wins forever` 같은 root 확정 불변식은 여전히 state machine에서 보장해야 한다.
+
+따라서 Phase 1/2의 선택은 "ValKey로 영구 불변식을 보장하고, lock은 동일 subject의 동시 실행을 줄이는 fast path로 사용"이다.
+Kafka가 event backbone으로 안정화되면 `PacketQueue` backend는 Kafka partition-by-subject로 바꿀 수 있지만, `subject:{subjectKey}` CAS 규약은 유지한다.
+
+### 5-2. Lock TTL and root claim
+
+`lock:subject:{subjectKey}` TTL은 worker mutual exclusion을 돕는 lease일 뿐, root 확정의 단독 보장 장치가 아니다.
+worker가 downstream write 중 멈추거나 network timeout이 길어져 lock TTL이 만료되면 다른 worker가 같은 subject를 처리할 수 있다.
+
+`first root wins forever` 는 `subject:{subjectKey}` 에 대한 원자적 root claim/commit으로 보장한다.
+
+```text
+beginRootClaim(subjectKey, claimToken, claimExpiresAt):
+  state = HGETALL subject:{subjectKey}
+
+  if state.rootMessageId exists:
+    return existing_root(state)
+
+  if state.rootClaimToken exists and state.rootClaimExpiresAt > now:
+    return claim_busy(state.rootClaimToken)
+
+  HSET subject:{subjectKey}
+    rootClaimToken claimToken
+    rootClaimExpiresAt claimExpiresAt
+    rootState root_creating
+    updatedAt now
+  EXPIRE subject:{subjectKey} 90d
+  return claim_acquired(claimToken)
+
+commitRootClaim(subjectKey, claimToken, rootMessageId, channelId, groupId):
+  state = HGETALL subject:{subjectKey}
+
+  if state.rootMessageId exists:
+    return existing_root(state)
+
+  if state.rootClaimToken != claimToken:
+    return claim_lost(state)
+
+  HSET subject:{subjectKey}
+    rootMessageId rootMessageId
+    channelId channelId
+    groupId groupId
+    rootState pending_anchor
+    updatedAt now
+  HDEL subject:{subjectKey} rootClaimToken rootClaimExpiresAt
+  EXPIRE subject:{subjectKey} 90d
+  return committed(rootMessageId)
+```
+
+위 두 함수는 ValKey Lua/function 또는 optimistic transaction으로 구현한다.
+worker는 root 생성 전 `beginRootClaim` 을 먼저 통과해야 하고, ChannelTalk root 생성 후 `commitRootClaim` 이 성공한 root만 canonical root로 사용한다.
+lock TTL이 만료되어 다른 worker가 들어오더라도 이미 `rootMessageId` 가 있으면 그 값을 따른다.
+아직 root 생성 중이면 claim expiry 전까지 새 root를 만들지 않는다.
+
+claim lease는 ChannelTalk root 생성 timeout보다 길게 잡고 처리 중 heartbeat로 연장한다.
+worker가 claim을 잃은 뒤 뒤늦게 downstream root를 만들었더라도 `commitRootClaim` 에 실패하므로 그 root는 canonical state에 들어가지 않는다.
+이 경우 운영상 orphan root가 남을 수 있지만, subject의 canonical root가 바뀌거나 두 root가 동시에 state에 기록되지는 않는다.
+
+### 5-3. Complexity and rollout gate
+
+이 설계는 처음부터 모든 복잡도를 켜는 계획이 아니다.
+운영 복잡도는 아래 순서로 점진 도입한다.
+
+1. 단일 worker + delivery dedup + root claim CAS를 먼저 적용한다.
+2. queue lag 또는 subject contention이 관찰될 때만 multi-worker와 `lock:subject:{subjectKey}` 를 켠다.
+3. root lookup miss, pending Anchor, pre-root timeout이 실제 지표로 확인될 때 Phase 2 lazy rebuild/retry를 켠다.
+4. Kafka partition-by-subject가 플랫폼 기본 경로가 되면 `PacketQueue` backend를 교체하고 ValKey stream 의존도를 낮춘다.
+
+복잡도 확대 기준:
+
+- duplicate delivery 또는 redelivery로 같은 webhook이 여러 번 처리된다.
+- 같은 issue/PR subject에서 root lookup miss 또는 duplicate root가 관찰된다.
+- webhook ack 지연을 줄이기 위해 ingress와 worker를 분리해야 한다.
+- 단일 worker의 queue lag가 운영 SLO를 넘는다.
+
+이 기준을 만족하지 않으면 단일 worker + dedup + root claim CAS까지만 적용한다.
+ValKey stream, subject lock, state machine은 같은 인터페이스 뒤에 두어 단계적으로 켜고 끌 수 있게 둔다.
+
+## 6. ValKey Schema
 
 Schema는 phase별 책임과 필요한 키만 남김.
 
-### 5-1. Phase 1 목표와 필수 키
+### 6-1. Phase 1 목표와 필수 키
 
-목표: delivery dedup, subject lock/shared state, pre-root queue 도입.
+목표: delivery dedup, subject lock/shared state, root claim CAS, pre-root queue 도입.
 
 ```text
 # delivery dedup
@@ -139,8 +230,12 @@ atomicEnqueue(packet):
 - 즉 ingress crash/retry에 대해 `deliveryID` 당 `stream:github-events` enqueue는 0회 또는 1회만 관찰되게 만든다.
 - `lock:subject:{subjectKey}`
   - 같은 subject를 동시에 두 worker가 처리하지 못하게 하는 distributed lock
+  - correctness boundary가 아니라 contention을 줄이는 lease
+  - TTL 만료 후 동시 worker가 생겨도 root 확정은 `subject:{subjectKey}` root claim CAS가 보장
 - `subject:{subjectKey}`
   - root를 다시 찾기 위한 minimal root pointer state를 저장하는 shared state
+  - `rootMessageId` 는 ValKey Lua/function 또는 optimistic transaction으로만 최초 기록
+  - `rootClaimToken/rootClaimExpiresAt` 으로 root 생성 중 상태를 표현하고 stale claim만 재획득 허용
   - write/update 때 TTL을 90일로 갱신
   - 장기간 닫힌 subject는 자연 만료되고, state miss는 Phase 2 lazy rebuild로 복구
 - `pre-root:subject:{subjectKey}`
@@ -161,7 +256,9 @@ subjectKey
 rootMessageId
 channelId
 groupId
-rootState               # waiting_root | waiting_root_expired | pending_anchor | ready
+rootState               # waiting_root | waiting_root_expired | root_creating | pending_anchor | ready
+rootClaimToken          # optional, root_creating lease owner
+rootClaimExpiresAt      # optional, root_creating lease expiry
 updatedAt
 ```
 
@@ -202,7 +299,7 @@ payload
 즉 정책은 `first root wins forever` 이다.
 late `opened` reconciliation을 위해 root merge나 root 교체는 하지 않는다.
 
-### 5-2. Phase 2 목표와 확장 키
+### 6-2. Phase 2 목표와 확장 키
 
 목표: pending Anchor retry, verified Anchor lazy rebuild, bounded abandon.
 

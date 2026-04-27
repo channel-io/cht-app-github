@@ -61,7 +61,7 @@ func (w *EventWorker) ProcessPacket(ctx context.Context, msg QueuedPacket) error
             state = expired
         }
 
-        root, ok, err := w.tryCreateRootIfEligible(ctx, subjectKey, state, pkt)
+        root, ok, err := w.tryClaimAndCreateRootIfEligible(ctx, subjectKey, state, pkt)
         if err != nil {
             return err
         }
@@ -100,3 +100,67 @@ func (w *EventWorker) ProcessPacket(ctx context.Context, msg QueuedPacket) error
 - wait window가 지나면 즉시 synthetic fallback root를 만들지 않고 `waiting_root_expired` 로 전이하되, 그 상태 전이를 만든 현재 packet은 ack하지 않고 이어서 rebuild/fallback 판단에 사용한다.
 - 이후 같은 subject의 새 packet이 오면 lazy rebuild를 먼저 시도하고, 그마저 실패한 경우에만 fallback root를 한 번 생성한다.
 - root가 생기면 buffered packet과 current packet을 같은 dispatch seam으로 흘린다.
+
+## 2. Root claim CAS
+
+`lock:subject:{subjectKey}` 는 동시 실행을 줄이는 lease다.
+root 확정은 아래 root claim CAS가 담당한다.
+
+```go
+func (w *EventWorker) tryClaimAndCreateRootIfEligible(
+    ctx context.Context,
+    subjectKey string,
+    state SubjectState,
+    pkt WebhookPacket,
+) (SubjectState, bool, error) {
+    if !isRootCreationEligible(state, pkt, w.clock.Now()) {
+        return SubjectState{}, false, nil
+    }
+
+    token := w.idgen.New()
+    claim, err := w.state.BeginRootClaim(ctx, subjectKey, token, w.clock.Now().Add(w.rootCreateLease))
+    if err != nil {
+        return SubjectState{}, false, err
+    }
+
+    switch claim.Kind {
+    case RootAlreadyExists:
+        return claim.State, true, nil
+    case RootClaimBusy:
+        return SubjectState{}, false, ErrRetryLater
+    case RootClaimAcquired:
+        // continue
+    }
+
+    created, err := w.channel.CreateRootMessage(ctx, pkt)
+    if err != nil {
+        _ = w.state.ReleaseRootClaim(ctx, subjectKey, token)
+        return SubjectState{}, false, err
+    }
+
+    committed, err := w.state.CommitRootClaim(ctx, subjectKey, token, created.RootMessageID, created.ChannelID, created.GroupID)
+    if err != nil {
+        return SubjectState{}, false, err
+    }
+
+    switch committed.Kind {
+    case RootCommitSucceeded:
+        return committed.State, true, nil
+    case RootAlreadyExists:
+        return committed.State, true, nil
+    case RootClaimLost:
+        return SubjectState{}, false, ErrRetryLater
+    }
+
+    return SubjectState{}, false, nil
+}
+```
+
+- `BeginRootClaim` 과 `CommitRootClaim` 은 ValKey Lua/function 또는 optimistic transaction으로 실행한다.
+- `BeginRootClaim` 은 기존 `rootMessageId` 가 있으면 새 claim을 만들지 않고 existing root를 반환한다.
+- `root_creating` claim이 만료되지 않았으면 다른 worker는 root를 만들지 않고 retry/backoff 한다.
+- `CommitRootClaim` 은 `rootClaimToken` 이 일치하고 기존 `rootMessageId` 가 없을 때만 root pointer를 기록한다.
+- `ErrRetryLater` 는 stream ack 없이 retry/backoff 해야 하는 오류로 취급한다.
+- lock TTL이 만료되어 두 worker가 같은 subject를 처리해도 `rootMessageId` 를 두 번 기록할 수 없다.
+- claim lease는 ChannelTalk root 생성 timeout보다 길게 잡고, 장시간 처리에는 heartbeat로 연장한다.
+- claim을 잃은 worker가 뒤늦게 만든 downstream root는 canonical state에 들어가지 않는다. cleanup 대상이 될 수는 있지만 `first root wins forever` invariant는 깨지지 않는다.
