@@ -24,14 +24,18 @@ func (w *EventWorker) ProcessPacket(ctx context.Context, msg QueuedPacket) error
         }
 
         if requiresExistingRoot(pkt) {
-            rebuilt, ok, err := w.tryResolveExistingRoot(ctx, subjectKey, pkt)
+            resolved, err := w.tryResolveExistingRoot(ctx, subjectKey, pkt)
             if err != nil {
                 return err
             }
-            if ok {
-                return w.dispatch.DispatchCurrent(ctx, msg, rebuilt, pkt)
+            switch resolved.Kind {
+            case ExistingRootFound:
+                return w.dispatch.DispatchCurrent(ctx, msg, resolved.State, pkt)
+            case ExistingRootRetryLater:
+                return ErrRetryLater
+            case ExistingRootFinalMiss:
+                return w.queue.Ack(ctx, msg.StreamID)
             }
-            return w.queue.Ack(ctx, msg.StreamID)
         }
 
         if rebuilt, ok, err := w.tryLazyRebuildFromVerifiedAnchor(ctx, subjectKey, pkt); err != nil {
@@ -46,16 +50,23 @@ func (w *EventWorker) ProcessPacket(ctx context.Context, msg QueuedPacket) error
                 return err
             }
 
-            waiting := ensureWaitingRootState(subjectKey, state, w.clock.Now())
-            if err := w.state.Save(ctx, waiting); err != nil {
+            waitingPatch := buildWaitingRootPatch(subjectKey, state, w.clock.Now())
+            if _, err := w.state.Patch(ctx, subjectKey, state.Version, waitingPatch); err != nil {
+                if errors.Is(err, ErrVersionConflict) {
+                    return ErrRetryLater
+                }
                 return err
             }
             return w.queue.Ack(ctx, msg.StreamID)
         }
 
         if shouldMarkWaitingRootExpired(state, w.clock.Now()) {
-            expired := ensureWaitingRootExpiredState(subjectKey, state, w.clock.Now())
-            if err := w.state.Save(ctx, expired); err != nil {
+            expiredPatch := buildWaitingRootExpiredPatch(subjectKey, state, w.clock.Now())
+            expired, err := w.state.Patch(ctx, subjectKey, state.Version, expiredPatch)
+            if err != nil {
+                if errors.Is(err, ErrVersionConflict) {
+                    return ErrRetryLater
+                }
                 return err
             }
             state = expired
@@ -77,9 +88,10 @@ func (w *EventWorker) ProcessPacket(ctx context.Context, msg QueuedPacket) error
             return w.dispatch.DispatchCurrent(ctx, msg, root, pkt)
         }
 
-        root.LastProcessedAt = w.clock.Now()
-        root.LastProcessedID = pkt.DeliveryID
-        if err := w.state.Save(ctx, root); err != nil {
+        if err := w.state.MarkOpenedProcessed(ctx, root.SubjectKey, root.Version, pkt.DeliveryID, w.clock.Now()); err != nil {
+            if errors.Is(err, ErrVersionConflict) {
+                return ErrRetryLater
+            }
             return err
         }
         return w.queue.Ack(ctx, msg.StreamID)
@@ -90,10 +102,13 @@ func (w *EventWorker) ProcessPacket(ctx context.Context, msg QueuedPacket) error
 - dispatchable root가 있으면 바로 root-ready dispatch path로 보낸다.
 - `computeSubjectKey`는 final subject를 정할 수 없는 packet에 대해 `(subjectKey, false)` 를 반환할 수 있다.
 - 현재 기준으로 `status` / `check_run`은 merged PR association miss 시 여기서 바로 종료한다.
-- root가 없고 기존 root가 반드시 필요한 packet이면 current behavior와 동일한 existing-root lookup / bounded retry를 먼저 시도하고, 그 lookup이 실패한 경우에만 종료한다.
+- root가 없고 기존 root가 반드시 필요한 packet이면 current behavior와 동일한 existing-root lookup / bounded retry를 먼저 시도한다.
+- existing-root lookup 결과는 `Found`, `RetryLater`, `FinalMiss` 로 구분한다. `FinalMiss` 만 ack/drop 한다.
 - root가 없으면 verified Anchor -> pre-root queue -> `waiting_root_expired` -> eligible root 생성 순서로 내려간다.
 - pre-root append는 delivery 단위로 idempotent 해야 한다.
 - 같은 stream message가 worker retry로 재처리돼도 동일 `deliveryID` 는 한 번만 buffer append 되고, `waiting_root` state는 재시도에서 항상 복구 가능해야 한다.
+- subject state update는 blind `Save` 가 아니라 `version` 기반 patch로만 수행한다.
+- `ErrVersionConflict` 는 정상적인 stale worker 신호이며, stream ack 없이 retry/backoff 한다.
 - `DispatchCurrent` 는 Phase 1/2에서 downstream write-side ledger를 두지 않는 best-effort dispatch seam이다.
 - 따라서 downstream thread write 성공 후 ack/state 저장 전에 worker가 중단되면 동일 `deliveryID` 의 thread message가 중복 전송될 수 있다.
 - `opened`가 wait window 안에 오면 그 packet으로 normal root를 만든다.
@@ -140,6 +155,7 @@ func (w *EventWorker) tryClaimAndCreateRootIfEligible(
 
     committed, err := w.state.CommitRootClaim(ctx, subjectKey, token, created.RootMessageID, created.ChannelID, created.GroupID)
     if err != nil {
+        w.metrics.RootCommitAfterCreateFailed(subjectKey)
         return SubjectState{}, false, err
     }
 
@@ -163,4 +179,6 @@ func (w *EventWorker) tryClaimAndCreateRootIfEligible(
 - `ErrRetryLater` 는 stream ack 없이 retry/backoff 해야 하는 오류로 취급한다.
 - lock TTL이 만료되어 두 worker가 같은 subject를 처리해도 `rootMessageId` 를 두 번 기록할 수 없다.
 - claim lease는 ChannelTalk root 생성 timeout보다 길게 잡고, 장시간 처리에는 heartbeat로 연장한다.
+- root 생성 이후 `CommitRootClaim` 이 실패하면 claim을 즉시 해제하지 않고 retry/backoff 한다.
 - claim을 잃은 worker가 뒤늦게 만든 downstream root는 canonical state에 들어가지 않는다. cleanup 대상이 될 수는 있지만 `first root wins forever` invariant는 깨지지 않는다.
+- ChannelTalk root 생성 성공 후 `CommitRootClaim` 전 crash의 exactly-once root creation은 Phase 1/2의 non-goal이다.

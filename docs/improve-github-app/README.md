@@ -1,6 +1,6 @@
 # GitHub App 개선 ValKey Schema 요약
 
-용어 -> Goals / Non-goals / Semantics -> ValKey Schema.
+용어 -> Goals / Non-goals / Semantics -> Design Decisions -> ValKey Schema.
 
 ## 1. 용어 정의
 
@@ -60,7 +60,7 @@ association miss 시 packet은 drop/skip 한다.
 - delivery dedup을 도입해 같은 webhook delivery의 중복 처리를 막는다.
 - issue / PR subject 단위 lock/shared state를 도입해 canonical root를 한 번만 정한다.
 - out-of-order event를 pre-root queue와 lazy rebuild로 흡수한다.
-- partial failure after root write 상황에서도 state/Anchor 기반으로 resume 가능하게 만든다.
+- root pointer commit 이후 Anchor 생성/갱신 실패는 state 기반으로 retry/resume 가능하게 만든다.
 - `status` / `check_run`은 기존 merged PR thread에만 연결되게 유지한다.
 
 ## 3. Non-goals
@@ -71,6 +71,8 @@ association miss 시 packet은 drop/skip 한다.
 - `status` / `check_run`용 독립 subject나 fallback root를 만들지 않는다.
 - release event를 Phase 1/2의 subject/root/anchor state machine에 포함하지 않는다.
 - ingress stream을 장기 source-of-truth 저장소로 쓰지 않는다.
+- ChannelTalk root 생성 성공 후 subject state commit 전 crash의 exactly-once root creation을 보장하지 않는다.
+- orphan ChannelTalk root 자동 삭제/병합은 하지 않고 metric과 수동 cleanup 대상으로 둔다.
 
 ## 4. Processing Semantics
 
@@ -82,6 +84,8 @@ association miss 시 packet은 drop/skip 한다.
 - pre-root queue는 bounded hold 용도다. packet은 짧은 window 동안만 유지하고, timeout 이후에는 `waiting_root_expired` 와 lazy rebuild로 복구를 시도한다.
 - downstream dispatch는 best-effort retry 대상이다. worker가 downstream thread write 성공 후 ack/state 저장 전에 중단되면 동일 delivery의 thread message가 중복 관찰될 수 있다.
 - 따라서 Phase 1/2의 dedup 범위는 ingress 진입, pre-root append, canonical root selection까지로 한정한다.
+- ChannelTalk side effect는 exactly-once 보장 범위 밖이다. 특히 root 생성 성공 후 `commitRootClaim` 전 crash가 나면 user-visible orphan root가 생길 수 있다.
+- 이 경우 `subject:{subjectKey}` 에는 root claim CAS로 하나의 canonical root만 기록하고, orphan root는 운영 지표와 수동 cleanup으로 다룬다.
 
 ## 5. Design Decisions
 
@@ -153,15 +157,124 @@ lock TTL이 만료되어 다른 worker가 들어오더라도 이미 `rootMessage
 claim lease는 ChannelTalk root 생성 timeout보다 길게 잡고 처리 중 heartbeat로 연장한다.
 worker가 claim을 잃은 뒤 뒤늦게 downstream root를 만들었더라도 `commitRootClaim` 에 실패하므로 그 root는 canonical state에 들어가지 않는다.
 이 경우 운영상 orphan root가 남을 수 있지만, subject의 canonical root가 바뀌거나 두 root가 동시에 state에 기록되지는 않는다.
+root 생성 이후 `commitRootClaim` 이 실패하면 worker는 claim을 즉시 해제하지 않고 retry/backoff 한다.
+그래도 claim lease가 만료되면 새 worker가 다시 root를 만들 수 있으며, 이 위험은 Phase 1/2에서 accepted trade-off로 둔다.
 
-### 5-3. Complexity and rollout gate
+운영 지표:
+
+- `root_claim_expired_total`
+- `root_commit_after_create_failed_total`
+- `root_orphan_suspected_total`
+
+### 5-3. Subject state update contract
+
+`subject:{subjectKey}` 에 대한 일반 update는 blind overwrite를 금지한다.
+`lock:subject:{subjectKey}` 는 lease이므로, lock을 잡았던 worker도 stale state를 저장할 수 있다.
+
+모든 state update는 아래 둘 중 하나로만 수행한다.
+
+1. ValKey Lua/function으로 조건과 patch를 한 번에 적용한다.
+2. optimistic transaction으로 `version` 을 확인한 뒤 patch를 적용한다.
+
+```text
+patchSubjectState(subjectKey, expectedVersion, patch):
+  state = HGETALL subject:{subjectKey}
+
+  if state.version != expectedVersion:
+    return version_conflict
+
+  if patch clears rootMessageId/channelId/groupId:
+    return invalid_patch
+
+  if state.rootMessageId exists and patch.rootState is waiting_root:
+    return invalid_patch
+
+  HSET subject:{subjectKey} patch
+  HINCRBY subject:{subjectKey} version 1
+  HSET subject:{subjectKey} updatedAt now
+  EXPIRE subject:{subjectKey} 90d
+  return patched
+```
+
+Monotonic fields:
+
+- `rootMessageId`, `channelId`, `groupId` 는 한 번 set 되면 삭제/교체하지 않는다.
+- `rootClaimToken`, `rootClaimExpiresAt` 은 claim owner, expired claim takeover, 또는 successful commit만 변경한다.
+- `anchorCommentId` 는 verified Anchor 또는 pending Anchor retry 성공으로만 set 한다.
+- `rootState=ready/pending_anchor` 인 state를 stale `waiting_root` 로 되돌리지 않는다.
+
+version conflict는 정상적인 동시성 신호다.
+worker는 최신 state를 reload하고 다시 판단하거나, retryable packet이면 stream ack 없이 retry/backoff 한다.
+
+### 5-4. Stream retry and reclaim
+
+`stream:github-events` 는 ValKey Streams consumer group으로 소비한다.
+
+```text
+consumer group: github-event-workers
+consumer name : {workerId}
+read          : XREADGROUP GROUP github-event-workers {workerId}
+ack           : XACK stream:github-events github-event-workers {streamEntryID}
+reclaim       : XAUTOCLAIM/XCLAIM idle > 60s
+max attempts  : 10
+dead stream   : stream:github-events:dead
+```
+
+Worker ack 규칙:
+
+- 처리 성공, duplicate, unsupported event, final abandon 만 `XACK` 한다.
+- retryable error, busy root claim, retryable existing-root lookup miss는 ack하지 않는다.
+- attempt count가 10회를 넘으면 original packet과 last error를 dead stream에 기록하고 original entry를 `XACK` 한다.
+
+Stream trim 규칙:
+
+- stream은 최근 backlog 보관용이며 기본 retention은 1h다.
+- pending entry는 trim 대상에서 제외한다.
+- trim cutoff는 `XPENDING` 의 가장 작은 pending ID보다 오래된 acked entry에만 적용한다.
+- dead stream은 별도 retention을 두고 운영 확인 후 삭제한다.
+
+운영 지표:
+
+- `github_event_stream_pending`
+- `github_event_stream_reclaimed_total`
+- `github_event_stream_dead_total`
+- `github_event_stream_attempts_total`
+
+### 5-5. Verified Anchor
+
+Phase 2 lazy rebuild는 ChannelTalk URL 문자열만으로 root를 복구하지 않는다.
+앱이 작성한 GitHub comment 안의 hidden marker와 URL을 함께 검증한다.
+
+Anchor comment format:
+
+```text
+<!-- cht-app-github:anchor v1 subject=pr:org/repo#123 rootMessageId={rootMessageId} channelId={channelId} groupId={groupId} -->
+https://desk.channel.io/#/channels/{channelId}/team_chats/groups/{groupId}/{rootMessageId}
+```
+
+Verified Anchor 조건:
+
+- comment author가 현재 GitHub App bot이다.
+- marker version이 지원 범위 안이다.
+- marker subject가 worker가 계산한 `subjectKey` 와 정확히 일치한다.
+- URL에서 파싱한 `channelId/groupId/rootMessageId` 가 marker 값과 일치한다.
+- state에 이미 `rootMessageId` 가 있으면 Anchor 값으로 state를 교체하지 않는다.
+
+Pagination / conflict 규칙:
+
+- GitHub comments는 모든 page를 조회한다.
+- valid marker가 정확히 하나면 lazy rebuild에 사용한다.
+- 서로 다른 `rootMessageId` 의 valid marker가 여러 개면 자동 rebuild하지 않고 `anchor_conflict_total` 을 기록한다.
+- marker 없는 기존 URL-only comment는 Phase 2 rebuild source로 쓰지 않는다.
+
+### 5-6. Complexity and rollout gate
 
 이 설계는 처음부터 모든 복잡도를 켜는 계획이 아니다.
 운영 복잡도는 아래 순서로 점진 도입한다.
 
 1. 단일 worker + delivery dedup + root claim CAS를 먼저 적용한다.
 2. queue lag 또는 subject contention이 관찰될 때만 multi-worker와 `lock:subject:{subjectKey}` 를 켠다.
-3. root lookup miss, pending Anchor, pre-root timeout이 실제 지표로 확인될 때 Phase 2 lazy rebuild/retry를 켠다.
+3. root lookup miss, pending Anchor, pre-root abandon이 실제 지표로 확인될 때 Phase 2 lazy rebuild/retry를 켠다.
 4. Kafka partition-by-subject가 플랫폼 기본 경로가 되면 `PacketQueue` backend를 교체하고 ValKey stream 의존도를 낮춘다.
 
 복잡도 확대 기준:
@@ -187,7 +300,10 @@ Schema는 phase별 책임과 필요한 키만 남김.
 dedup:delivery:{deliveryID}        -> "{streamEntryID}"                TTL 7d
 
 # ingress queue
-stream:github-events               -> WebhookPacket                    retain 1h, trim by age/size
+stream:github-events               -> WebhookPacket                    retain acked entries 1h, pending-safe trim
+
+# dead queue
+stream:github-events:dead          -> WebhookPacket + lastError         retain 7d, trim by age/size
 
 # subject lock
 lock:subject:{subjectKey}          -> "{workerId}"                     TTL 30s
@@ -196,10 +312,10 @@ lock:subject:{subjectKey}          -> "{workerId}"                     TTL 30s
 subject:{subjectKey}               -> Hash / JSON                      TTL 90d, refresh on write
 
 # pre-root queue
-pre-root:subject:{subjectKey}      -> List(WebhookPacket)              TTL 30s
+pre-root:subject:{subjectKey}      -> List(WebhookPacket)              TTL 5m
 
 # pre-root idempotency guard
-pre-root:buffered-delivery:{subjectKey} -> Set(deliveryID)             TTL 30s
+pre-root:buffered-delivery:{subjectKey} -> Set(deliveryID)             TTL 5m
 ```
 
 키 역할:
@@ -212,6 +328,10 @@ pre-root:buffered-delivery:{subjectKey} -> Set(deliveryID)             TTL 30s
   - ingress가 raw webhook packet을 적재하는 단일 stream
   - `PacketQueue`의 ValKey Streams backend
   - source-of-truth 저장소가 아니라 짧은 transport backlog이므로 최근 1시간만 보관
+  - consumer group / pending reclaim / dead stream 규약은 Design Decisions의 stream retry contract를 따른다
+- `stream:github-events:dead`
+  - max attempts를 초과한 packet과 last error를 남기는 dead stream
+  - 운영자가 원인을 확인하고 수동 replay 또는 abandon 여부를 결정한다
 
 Ingress write contract:
 
@@ -236,14 +356,17 @@ atomicEnqueue(packet):
   - root를 다시 찾기 위한 minimal root pointer state를 저장하는 shared state
   - `rootMessageId` 는 ValKey Lua/function 또는 optimistic transaction으로만 최초 기록
   - `rootClaimToken/rootClaimExpiresAt` 으로 root 생성 중 상태를 표현하고 stale claim만 재획득 허용
+  - 일반 update는 `version` 기반 patch 또는 field-level monotonic merge로만 수행
   - write/update 때 TTL을 90일로 갱신
   - 장기간 닫힌 subject는 자연 만료되고, state miss는 Phase 2 lazy rebuild로 복구
 - `pre-root:subject:{subjectKey}`
   - root가 아직 없는 동안 subject의 모든 packet을 arrival order대로 잠깐 보관
-  - wait window보다 길게 유지해 timeout sweep가 늦어도 queue가 먼저 사라지지 않게 함
+  - wait window 30s보다 길게 5m 유지해 timeout sweep가 늦어도 queue가 먼저 사라지지 않게 함
+  - subject당 최대 100개 packet만 보관하고 초과분은 `pre_root_overflow_total` 기록 후 final abandon
   - `opened` 도착 시 채널톡 루트메시지 생성 후 drain
   - `opened`가 wait window 안에 오지 않아도 즉시 synthetic fallback root를 만들지 않음
   - timeout 시 subject를 `waiting_root_expired` 로만 표시하고, 이후 같은 subject의 새 packet이 올 때 지연 복구를 시도
+  - TTL 만료 전 복구되지 않은 buffered packet은 abandoned로 보고 `pre_root_abandoned_total` 을 기록
 - `pre-root:buffered-delivery:{subjectKey}`
   - pre-root queue에 이미 적재한 `deliveryID` 를 기록하는 idempotency guard
   - worker retry로 같은 packet이 재처리돼도 동일 `deliveryID` 는 한 번만 append 한다
@@ -259,6 +382,7 @@ groupId
 rootState               # waiting_root | waiting_root_expired | root_creating | pending_anchor | ready
 rootClaimToken          # optional, root_creating lease owner
 rootClaimExpiresAt      # optional, root_creating lease expiry
+version
 updatedAt
 ```
 
@@ -298,6 +422,14 @@ payload
 
 즉 정책은 `first root wins forever` 이다.
 late `opened` reconciliation을 위해 root merge나 root 교체는 하지 않는다.
+
+Pre-root constants:
+
+```text
+waitWindow          = 30s
+preRootTTL          = 5m
+maxBufferedPackets  = 100
+```
 
 ### 6-2. Phase 2 목표와 확장 키
 
