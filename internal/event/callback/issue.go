@@ -18,7 +18,16 @@ const (
 	issueOpenedTitle               = ":rotating_light: %s New issue opened! %s by %s"
 	issueAssignedTitleFormat       = ":pray: %s assigned to %s"
 	issueClosedTitleFormat         = ":x: %s closed by %s"
+	commentBodyMaxRunes            = 100
 )
+
+func truncateRunes(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "..."
+}
 
 func NewIssueCommentCreated(commonSvc *svc.CommonSvc, issueSvc *svc.IssueSvc) *IssueCommentCreated {
 	return &IssueCommentCreated{
@@ -85,9 +94,11 @@ func (cb *IssueCommentCreated) buildMessage(ctx context.Context, installCtx gith
 		title = fmt.Sprintf(issueCommentCreatedTitleFormat, mentionTexts.String(), model.InlineLink(event.Issue.GetHTMLURL(), "issue"), sender)
 	}
 
-	return model.NewMessage(
-		model.NewTextBlock(title),
-	), nil
+	blocks := []model.MessageBlock{model.NewTextBlock(title)}
+	if body := truncateRunes(event.Comment.GetBody(), commentBodyMaxRunes); body != "" {
+		blocks = append(blocks, model.NewTextBlock(body))
+	}
+	return model.NewMessage(blocks...), nil
 }
 
 func NewIssuesEventOpened(commonSvc *svc.CommonSvc, issueSvc *svc.IssueSvc) *IssuesEventOpened {
