@@ -96,7 +96,7 @@ func (cb *IssueCommentCreated) buildMessage(ctx context.Context, installCtx gith
 
 	blocks := []model.MessageBlock{model.NewTextBlock(title)}
 	if body := truncateRunes(event.Comment.GetBody(), commentBodyMaxRunes); body != "" {
-		blocks = append(blocks, model.NewTextBlock(body))
+		blocks = append(blocks, model.NewTextBlock(model.EscapedString(body)))
 	}
 	return model.NewMessage(blocks...), nil
 }
