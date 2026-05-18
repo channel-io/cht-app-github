@@ -229,9 +229,9 @@ func (cb *PullRequestReviewEventSubmitted) buildMessage(ctx context.Context, ins
 	}
 	var title string
 	if event.Review.GetState() == "approved" {
-		title = fmt.Sprintf(pullRequestReviewApprovedTitleFormat, mentionTexts.String(), model.InlineLink(event.PullRequest.GetHTMLURL(), "pull request"), senderManager)
+		title = fmt.Sprintf(pullRequestReviewApprovedTitleFormat, mentionTexts.String(), model.InlineLink(event.Review.GetHTMLURL(), "pull request"), senderManager)
 	} else {
-		title = fmt.Sprintf(pullRequestReviewCommentedTitleFormat, mentionTexts.String(), model.InlineLink(event.PullRequest.GetHTMLURL(), "pull request"), senderManager)
+		title = fmt.Sprintf(pullRequestReviewCommentedTitleFormat, mentionTexts.String(), model.InlineLink(event.Review.GetHTMLURL(), "pull request"), senderManager)
 	}
 
 	return model.NewMessage(
