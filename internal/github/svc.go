@@ -29,6 +29,7 @@ type Service interface {
 	CreateComment(ctx context.Context, installCtx InstallationContext, repository string, number int, body string) error
 	ListPullRequestNumberByCommitSHA(ctx context.Context, installCtx InstallationContext, repoName, sha string, predicates ...FilterPullRequestPredicate) ([]*github.PullRequest, error)
 	FetchPullRequest(ctx context.Context, installCtx InstallationContext, repository string, number int) (*github.PullRequest, error)
+	FetchReview(ctx context.Context, installCtx InstallationContext, repository string, prNumber int, reviewID int64) (*github.PullRequestReview, error)
 	AddAssigneeToIssue(ctx context.Context, installCtx InstallationContext, repository string, number int, assignees []string) error
 	FindAppInstallationID(ctx context.Context, org string) (*int64, error)
 	ListReviewRequestedPullRequest(ctx context.Context, installCtx InstallationContext, user string) ([]*github.Issue, error)
@@ -221,6 +222,18 @@ func (s *ServiceImpl) FetchPullRequest(ctx context.Context, installCtx Installat
 		return nil, err
 	}
 	return issue, nil
+}
+
+func (s *ServiceImpl) FetchReview(ctx context.Context, installCtx InstallationContext, repository string, prNumber int, reviewID int64) (*github.PullRequestReview, error) {
+	client, err := s.getInstallationClient(installCtx)
+	if err != nil {
+		return nil, err
+	}
+	review, _, err := client.PullRequests.GetReview(ctx, installCtx.OrgLogin, repository, prNumber, reviewID)
+	if err != nil {
+		return nil, err
+	}
+	return review, nil
 }
 
 func (s *ServiceImpl) AddAssigneeToIssue(ctx context.Context, installCtx InstallationContext, repository string, number int, assignees []string) error {

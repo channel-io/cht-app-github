@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/cbrgm/githubevents/githubevents"
 	libgithub "github.com/google/go-github/v60/github"
@@ -15,18 +17,26 @@ import (
 
 const (
 	pullRequestReviewCommentInlineTitleFormat = ":thinking_face::speech_balloon: %s %s %s commented by %s"
+	inlineCommentDedupTTL                     = 1 * time.Hour
 )
 
-func NewPullRequestReviewCommentEventCreated(commonSvc *svc.CommonSvc, issueSvc *svc.IssueSvc) *PullRequestReviewCommentEventCreated {
+func NewPullRequestReviewCommentEventCreated(commonSvc *svc.CommonSvc, issueSvc *svc.IssueSvc, githubSvc github.Service) *PullRequestReviewCommentEventCreated {
 	return &PullRequestReviewCommentEventCreated{
 		commonSvc: commonSvc,
 		issueSvc:  issueSvc,
+		githubSvc: githubSvc,
 	}
 }
 
 type PullRequestReviewCommentEventCreated struct {
 	commonSvc *svc.CommonSvc
 	issueSvc  *svc.IssueSvc
+	githubSvc github.Service
+	// processedReviewIDs claims each review_id at most once so that a batched
+	// review submission with N inline comments yields at most one inline
+	// notification. Entries auto-expire after inlineCommentDedupTTL.
+	// Single-replica assumption.
+	processedReviewIDs sync.Map
 }
 
 func (cb *PullRequestReviewCommentEventCreated) Register(handler *githubevents.EventHandler) {
@@ -35,17 +45,46 @@ func (cb *PullRequestReviewCommentEventCreated) Register(handler *githubevents.E
 			return nil
 		}
 
+		reviewID := event.Comment.GetPullRequestReviewID()
+		if reviewID != 0 {
+			if _, claimed := cb.processedReviewIDs.LoadOrStore(reviewID, struct{}{}); claimed {
+				return nil
+			}
+			cb.scheduleDedupCleanup(reviewID)
+		}
+
 		installCtx := github.NewInstallationContext(
 			event.Installation.GetID(),
 			event.Org.GetLogin(),
 		)
 		ctx := context.TODO()
-		issueNumber := event.PullRequest.GetNumber()
+		repo := event.Repo.GetName()
+		prNumber := event.PullRequest.GetNumber()
+
+		// Wrapper body 가 있으면 PullRequestReviewEventSubmitted 핸들러가 처리하므로
+		// inline 알림은 보내지 않는다 (사용자 피드백 반영: body 없을 때만 inline 노출).
+		if reviewID != 0 {
+			review, err := cb.githubSvc.FetchReview(ctx, installCtx, repo, prNumber, reviewID)
+			if err != nil {
+				cb.processedReviewIDs.Delete(reviewID)
+				return err
+			}
+			if review.GetBody() != "" {
+				return nil
+			}
+		}
+
 		message, err := cb.buildMessage(ctx, installCtx, event)
 		if err != nil {
 			return err
 		}
-		return cb.issueSvc.SyncIssueWithChannelTalk(ctx, installCtx, event.Repo.GetName(), issueNumber, message)
+		return cb.issueSvc.SyncIssueWithChannelTalk(ctx, installCtx, repo, prNumber, message)
+	})
+}
+
+func (cb *PullRequestReviewCommentEventCreated) scheduleDedupCleanup(reviewID int64) {
+	time.AfterFunc(inlineCommentDedupTTL, func() {
+		cb.processedReviewIDs.Delete(reviewID)
 	})
 }
 
