@@ -89,9 +89,9 @@ func (cb *IssueCommentCreated) buildMessage(ctx context.Context, installCtx gith
 
 	var title string
 	if event.Issue.IsPullRequest() {
-		title = fmt.Sprintf(pullRequestReviewCommentedTitleFormat, mentionTexts.String(), model.InlineLink(event.Issue.GetHTMLURL(), "pull request"), sender)
+		title = fmt.Sprintf(pullRequestReviewCommentedTitleFormat, mentionTexts.String(), model.InlineLink(event.Comment.GetHTMLURL(), "pull request"), sender)
 	} else {
-		title = fmt.Sprintf(issueCommentCreatedTitleFormat, mentionTexts.String(), model.InlineLink(event.Issue.GetHTMLURL(), "issue"), sender)
+		title = fmt.Sprintf(issueCommentCreatedTitleFormat, mentionTexts.String(), model.InlineLink(event.Comment.GetHTMLURL(), "issue"), sender)
 	}
 
 	blocks := []model.MessageBlock{model.NewTextBlock(title)}
