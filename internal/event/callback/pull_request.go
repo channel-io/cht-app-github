@@ -234,9 +234,11 @@ func (cb *PullRequestReviewEventSubmitted) buildMessage(ctx context.Context, ins
 		title = fmt.Sprintf(pullRequestReviewCommentedTitleFormat, mentionTexts.String(), model.InlineLink(event.Review.GetHTMLURL(), "pull request"), senderManager)
 	}
 
-	return model.NewMessage(
-		model.NewTextBlock(title),
-	), nil
+	blocks := []model.MessageBlock{model.NewTextBlock(title)}
+	if body := truncateRunes(event.Review.GetBody(), commentBodyMaxRunes); body != "" {
+		blocks = append(blocks, model.NewTextBlock(model.EscapedString(body)))
+	}
+	return model.NewMessage(blocks...), nil
 }
 
 func NewPullRequestEventReviewRequested(commonSvc *svc.CommonSvc, issueSvc *svc.IssueSvc) *PullRequestEventReviewRequested {
