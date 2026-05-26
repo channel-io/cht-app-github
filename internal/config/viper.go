@@ -59,6 +59,8 @@ func fillDefaultValues() {
 	viper.SetDefault("log.level", "info")
 	viper.SetDefault("log.enableConsole", false)
 	viper.SetDefault("log.enableSentry", false)
+	viper.SetDefault("valkey.url", "")
+	viper.SetDefault("valkey.clusterMode", false)
 }
 
 func readStage() (Stage, error) {

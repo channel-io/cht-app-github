@@ -7,6 +7,10 @@ import (
 )
 
 var Option = fx.Options(
-	fx.Invoke(config.Init),
-	fx.Provide(config.Load),
+	fx.Provide(loadConfig),
 )
+
+func loadConfig() (*config.Config, error) {
+	config.Init()
+	return config.Load()
+}
