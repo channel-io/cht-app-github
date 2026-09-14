@@ -60,6 +60,7 @@ func (s *ServiceImpl) FindManagerByGitHubMentionUsername(ctx context.Context, ch
 		return &manager, nil
 	}
 
+	// TODO: core api에 개별 매니저 조회 api가 추가되면, 단건 조회로 변경 필요.
 	// 재조회까지 했는데도 없었던 username 은 당분간 재조회를 생략한다.
 	missKey := channelID + "/" + key
 	if missed, err := s.mentionMissCache.Get(ctx, missKey); err == nil && missed != nil {
