@@ -321,13 +321,38 @@ func TestServiceImpl_FindManagerByGitHubMentionUsername_RefetchesOncePerMiss(t *
 	assert.Nil(t, actual)
 	m.AssertNumberOfCalls(t, "ListManagers", 2)
 
-	// 이후 호출도 미스마다 재조회를 1회씩만 수행한다. (호출당 최대 1회)
+	// 재조회에도 없었던 username  은 negative cache 에 걸려 추가 조회를 하지 않는다.
 	for range 3 {
 		actual, err = s.FindManagerByGitHubMentionUsername(ctx, "1", "outside-contributor")
 		assert.NoError(t, err)
 		assert.Nil(t, actual)
 	}
-	m.AssertNumberOfCalls(t, "ListManagers", 5)
+	m.AssertNumberOfCalls(t, "ListManagers", 2)
+}
+
+func TestServiceImpl_FindManagerByGitHubMentionUsername_DoesNotCacheMissOnFetchError(t *testing.T) {
+	t.Parallel()
+
+	managers := []model.Manager{
+		{ID: "1", Name: "Claud", GithubUsername: ptrString("ch-claud")},
+	}
+
+	m := new(mockClient)
+	// 캐시 생성 1회 성공, 이후 재조회는 계속 실패한다.
+	m.On("ListManagers", mock.Anything, mock.Anything).Return(managers, nil).Once()
+	m.On("ListManagers", mock.Anything, mock.Anything).Return(([]model.Manager)(nil), assert.AnError)
+
+	s := NewServiceImpl(m, new(config.Config))
+
+	ctx := context.TODO()
+	for range 3 {
+		// 조회에 실패해도 에러 대신 github username 을 쓰도록 nil 을 반환한다.
+		actual, err := s.FindManagerByGitHubMentionUsername(ctx, "1", "ch-dylan")
+		assert.NoError(t, err)
+		assert.Nil(t, actual)
+	}
+	// 실패는 negative cache 에 기록하지 않으므로 매번 재조회를 시도한다.
+	m.AssertNumberOfCalls(t, "ListManagers", 4)
 }
 
 type mockClient struct {
