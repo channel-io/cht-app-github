@@ -34,6 +34,7 @@ type ServiceImpl struct {
 	client              client.Client
 	githubUserNameCache ManagerCache
 	managerIDCache      cache.Cache[model.Manager]
+	mentionMissCache    cache.Cache[bool]
 
 	deskURL string
 }
@@ -43,6 +44,7 @@ func NewServiceImpl(client client.Client, conf *config.Config) *ServiceImpl {
 		client:              client,
 		githubUserNameCache: cache.NewLocalCache[map[string]model.Manager](),
 		managerIDCache:      cache.NewLocalCache[model.Manager](),
+		mentionMissCache:    cache.NewLocalCache[bool](),
 		deskURL:             conf.ChannelTalk.DeskUrl,
 	}
 }
@@ -58,13 +60,24 @@ func (s *ServiceImpl) FindManagerByGitHubMentionUsername(ctx context.Context, ch
 		return &manager, nil
 	}
 
+	// TODO: core api에 개별 매니저 조회 api가 추가되면, 단건 조회로 변경 필요.
+	// 재조회까지 했는데도 없었던 username 은 당분간 재조회를 생략한다.
+	missKey := channelID + "/" + key
+	if missed, err := s.mentionMissCache.Get(ctx, missKey); err == nil && missed != nil {
+		return nil, nil
+	}
+
 	// Cache miss에는 Cache를 다시 만들어서 시도
 	if managerMap, err = s.fetchChannelManagersMap(ctx, channelID); err != nil {
-		return nil, err
+		// Cache fetch 실패의 경우, github username을 바로 사용하도록 한다.
+		return nil, nil
 	}
 	if manager, ok := managerMap[key]; ok {
 		return &manager, nil
 	}
+
+	// 조회에 성공했는데도 없는 경우에만 miss 를 기록한다.
+	_ = s.mentionMissCache.Set(ctx, missKey, true, 10*time.Minute)
 	return nil, nil
 }
 
