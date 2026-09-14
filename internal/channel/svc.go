@@ -59,9 +59,7 @@ func (s *ServiceImpl) FindManagerByGitHubMentionUsername(ctx context.Context, ch
 	}
 
 	// Cache miss에는 Cache를 다시 만들어서 시도
-	managerMap, err = s.fetchChannelManagersMap(ctx, channelID)
-	fmt.Printf("Rebuilt")
-	if err != nil {
+	if managerMap, err = s.fetchChannelManagersMap(ctx, channelID); err != nil {
 		return nil, err
 	}
 	if manager, ok := managerMap[key]; ok {
