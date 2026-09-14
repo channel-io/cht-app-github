@@ -251,6 +251,85 @@ func TestServiceImpl_BuildTeamChatURL(t *testing.T) {
 	}
 }
 
+func TestServiceImpl_FindManagerByGitHubMentionUsername_RefetchesOnMiss(t *testing.T) {
+	t.Parallel()
+
+	beforeRegister := []model.Manager{
+		{ID: "1", Name: "Claud", GithubUsername: ptrString("ch-claud")},
+	}
+	afterRegister := []model.Manager{
+		{ID: "1", Name: "Claud", GithubUsername: ptrString("ch-claud")},
+		{ID: "2", Name: "Dylan", GithubUsername: ptrString("ch-dylan")},
+	}
+
+	m := new(mockClient)
+	// 첫 조회는 등록 전 데이터, 미스 후 재조회는 등록 후 데이터를 반환한다.
+	m.On("ListManagers", mock.Anything, mock.Anything).Return(beforeRegister, nil).Once()
+	m.On("ListManagers", mock.Anything, mock.Anything).Return(afterRegister, nil).Once()
+
+	s := NewServiceImpl(m, new(config.Config))
+
+	actual, err := s.FindManagerByGitHubMentionUsername(context.TODO(), "1", "ch-dylan")
+	assert.NoError(t, err)
+	if assert.NotNil(t, actual) {
+		assert.Equal(t, "2", actual.ID)
+	}
+	// 캐시 TTL 을 기다리지 않고 맵을 다시 만들어 재조회했는지 확인한다.
+	m.AssertNumberOfCalls(t, "ListManagers", 2)
+}
+
+func TestServiceImpl_FindManagerByGitHubMentionUsername_CacheHitDoesNotRefetch(t *testing.T) {
+	t.Parallel()
+
+	managers := []model.Manager{
+		{ID: "1", Name: "Claud", GithubUsername: ptrString("ch-claud")},
+	}
+
+	m := new(mockClient)
+	m.On("ListManagers", mock.Anything, mock.Anything).Return(managers, nil)
+
+	s := NewServiceImpl(m, new(config.Config))
+
+	ctx := context.TODO()
+	for range 3 {
+		actual, err := s.FindManagerByGitHubMentionUsername(ctx, "1", "ch-claud")
+		assert.NoError(t, err)
+		if assert.NotNil(t, actual) {
+			assert.Equal(t, "1", actual.ID)
+		}
+	}
+	// 맵에 있는 username 은 재조회를 유발하지 않는다.
+	m.AssertNumberOfCalls(t, "ListManagers", 1)
+}
+
+func TestServiceImpl_FindManagerByGitHubMentionUsername_RefetchesOncePerMiss(t *testing.T) {
+	t.Parallel()
+
+	managers := []model.Manager{
+		{ID: "1", Name: "Claud", GithubUsername: ptrString("ch-claud")},
+	}
+
+	m := new(mockClient)
+	m.On("ListManagers", mock.Anything, mock.Anything).Return(managers, nil)
+
+	s := NewServiceImpl(m, new(config.Config))
+
+	ctx := context.TODO()
+	// 첫 호출: 캐시 생성 1회 + 미스 재조회 1회
+	actual, err := s.FindManagerByGitHubMentionUsername(ctx, "1", "outside-contributor")
+	assert.NoError(t, err)
+	assert.Nil(t, actual)
+	m.AssertNumberOfCalls(t, "ListManagers", 2)
+
+	// 이후 호출도 미스마다 재조회를 1회씩만 수행한다. (호출당 최대 1회)
+	for range 3 {
+		actual, err = s.FindManagerByGitHubMentionUsername(ctx, "1", "outside-contributor")
+		assert.NoError(t, err)
+		assert.Nil(t, actual)
+	}
+	m.AssertNumberOfCalls(t, "ListManagers", 5)
+}
+
 type mockClient struct {
 	mock.Mock
 	client.Client

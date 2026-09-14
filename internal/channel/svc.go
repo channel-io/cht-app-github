@@ -47,13 +47,24 @@ func NewServiceImpl(client client.Client, conf *config.Config) *ServiceImpl {
 	}
 }
 
-func (s *ServiceImpl) FindManagerByGitHubMentionUsername(ctx context.Context, channelID string, username string) (*model.Manager, error) {
+func (s *ServiceImpl) FindManagerByGitHubMentionUsername(ctx context.Context, channelID, username string) (*model.Manager, error) {
+	key := strings.ToLower(username)
+
 	managerMap, err := s.buildChannelManagersMap(ctx, channelID)
 	if err != nil {
 		return nil, err
 	}
+	if manager, ok := managerMap[key]; ok {
+		return &manager, nil
+	}
 
-	if manager, ok := managerMap[strings.ToLower(username)]; ok {
+	// Cache miss에는 Cache를 다시 만들어서 시도
+	managerMap, err = s.fetchChannelManagersMap(ctx, channelID)
+	fmt.Printf("Rebuilt")
+	if err != nil {
+		return nil, err
+	}
+	if manager, ok := managerMap[key]; ok {
 		return &manager, nil
 	}
 	return nil, nil
@@ -64,23 +75,24 @@ func (s *ServiceImpl) BuildMessageBlocksFromMarkdown(ctx context.Context, channe
 	if err != nil {
 		return nil, err
 	}
-
 	return messageconv.FromGithubMarkdown(markdown, managerMap).Convert(), nil
 }
 
 func (s *ServiceImpl) buildChannelManagersMap(ctx context.Context, channelID string) (map[string]model.Manager, error) {
-	// Note: ListManagers에서 내부적으로 paginated API call 하는 경우가 있어서 timeout을 설정해둠.
-	ctx, cancel := context.WithTimeout(ctx, 1*time.Minute)
-	defer cancel()
-
 	cached, err := s.githubUserNameCache.Get(ctx, channelID)
 	if err != nil {
 		return nil, err
 	}
-
 	if cached != nil {
 		return *cached, nil
 	}
+	return s.fetchChannelManagersMap(ctx, channelID)
+}
+
+// fetchChannelManagersMap 은 캐시를 무시하고 매니저 맵을 다시 만들어 캐시에 채운다.
+func (s *ServiceImpl) fetchChannelManagersMap(ctx context.Context, channelID string) (map[string]model.Manager, error) {
+	ctx, cancel := context.WithTimeout(ctx, 1*time.Minute)
+	defer cancel()
 
 	managers, err := s.client.ListManagers(ctx, channelID)
 	if err != nil {
