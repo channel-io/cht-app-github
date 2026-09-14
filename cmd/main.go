@@ -16,6 +16,7 @@ import (
 	"github.com/channel-io/cht-app-github/internal/logger"
 	"github.com/channel-io/cht-app-github/internal/loggerfx"
 	"github.com/channel-io/cht-app-github/internal/metricfx"
+	"github.com/channel-io/cht-app-github/internal/valkeyfx"
 )
 
 const (
@@ -54,6 +55,7 @@ func internalModule() fx.Option {
 		metricfx.MetricServerModule(),
 		functionfx.Module(),
 		githubfx.Module(),
+		valkeyfx.Module,
 	)
 }
 

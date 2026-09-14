@@ -10,6 +10,7 @@ import (
 	"github.com/channel-io/cht-app-github/internal/githubfx"
 	"github.com/channel-io/cht-app-github/internal/httpfx"
 	"github.com/channel-io/cht-app-github/internal/loggerfx"
+	"github.com/channel-io/cht-app-github/internal/valkeyfx"
 )
 
 func integratedTestModule() fx.Option {
@@ -22,5 +23,6 @@ func integratedTestModule() fx.Option {
 		eventfx.Option,
 		githubfx.Module(),
 		functionfx.Module(),
+		valkeyfx.Module,
 	)
 }

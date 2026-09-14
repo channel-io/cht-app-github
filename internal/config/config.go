@@ -38,6 +38,11 @@ type Config struct {
 		Level string
 	}
 
+	Valkey struct {
+		URL         string
+		ClusterMode bool
+	}
+
 	Github struct {
 		App struct {
 			Id             int64
