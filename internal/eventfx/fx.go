@@ -33,6 +33,7 @@ var Option = fx.Options(
 		eventCallback(callback.NewPullRequestEventOpened),
 		eventCallback(callback.NewPullRequestEventClosed),
 		eventCallback(callback.NewPullRequestReviewEventSubmitted),
+		eventCallback(callback.NewPullRequestReviewCommentEventCreated),
 		eventCallback(callback.NewPullRequestEventReviewRequested),
 		eventCallback(callback.NewPullRequestEventReviewRequestRemoved),
 		eventCallback(callback.NewPullRequestEventAssigned),
