@@ -20,8 +20,39 @@ ENV BUILD_TIME=${BUILD_TIME}
 
 WORKDIR /cht-app-github
 
-RUN apt-get update && apt-get install -qy \
-    ca-certificates
+# Upgrade packages with published Debian security fixes, including the CA bundle.
+RUN apt-get update && apt-get install -qy --only-upgrade \
+    ca-certificates \
+    curl \
+    dpkg \
+    gpgv \
+    krb5-locales \
+    libbrotli1 \
+    libc-bin \
+    libc6 \
+    libcap2 \
+    libcurl4 \
+    libgcrypt20 \
+    libgnutls30 \
+    libgssapi-krb5-2 \
+    libk5crypto3 \
+    libkrb5-3 \
+    libkrb5support0 \
+    liblzma5 \
+    libnghttp2-14 \
+    libpam-modules \
+    libpam-modules-bin \
+    libpam-runtime \
+    libpam0g \
+    libpcre2-8-0 \
+    libssh2-1 \
+    libssl3 \
+    libsystemd0 \
+    libudev1 \
+    openssl \
+    perl-base \
+    sed \
+    tzdata
 
 COPY --from=builder /cht-app-github/target/app ./app
 COPY --from=builder /cht-app-github/config/*.yml ./config/
