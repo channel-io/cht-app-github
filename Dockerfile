@@ -9,7 +9,7 @@ COPY . .
 
 RUN GOOS=$TARGETOS GOARCH=$TARGETARCH make build
 
-FROM public.ecr.aws/i8a4b9p4/circleci-base/debian:bookworm-slim-curl AS runtime
+FROM 360732775913.dkr.ecr.ap-northeast-2.amazonaws.com/base-image/debian:bookworm-slim-curl AS runtime
 
 ARG BUILD_VERSION
 ARG BUILD_COMMIT
@@ -21,7 +21,7 @@ ENV BUILD_TIME=${BUILD_TIME}
 WORKDIR /cht-app-github
 
 RUN apt-get update && apt-get install -qy \
-    ca-certificates
+    ca-certificates libbrotli1 tzdata
 
 COPY --from=builder /cht-app-github/target/app ./app
 COPY --from=builder /cht-app-github/config/*.yml ./config/
